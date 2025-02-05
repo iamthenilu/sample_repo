@@ -1,0 +1,179 @@
+from typing import TypedDict, List, Optional, Dict
+from langgraph.graph import StateGraph, END
+from langchain_community.vectorstores import FAISS
+from langchain_google_vertexai import VertexAIEmbeddings
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_community.document_loaders import DirectoryLoader, PyPDFLoader
+
+# Define state schema
+class EmploymentEntry(TypedDict):
+    employer: str
+    designation: str
+    service_duration: str
+    total_earnings: Optional[str]
+    evidence_status: Dict[str, bool]  # payslip, tax_return, bonus_statement
+
+class AgentState(TypedDict):
+    employment_entries: List[EmploymentEntry]
+    vector_store: FAISS
+    missing_evidence: List[Dict]
+    user_decision: Optional[bool]
+
+# Initialize components
+text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+embeddings = VertexAIEmbeddings(model_name="textembedding-gecko@latest")
+
+def pre_profiling(state: AgentState) -> AgentState:
+    """Node 1: Extract initial employment profile from all documents"""
+    loader = DirectoryLoader(
+        "supporting_folder/",
+        glob="**/*.pdf",
+        loader_cls=PyPDFLoader
+    )
+    documents = loader.load()
+    chunks = text_splitter.split_documents(documents)
+    vector_store = FAISS.from_documents(chunks, embeddings)
+    
+    # Extract employment history using LLM
+    history_docs = vector_store.similarity_search(
+        "employment history work experience positions held compensation salary",
+        k=7
+    )
+    
+    prompt = f"""Analyze these documents and extract employment history:
+    {[d.page_content for d in history_docs]}
+    
+    Return JSON with:
+    - employer (normalized company name)
+    - designation (job title)
+    - service_duration (start-end dates)
+    - total_earnings (if explicitly mentioned)
+    """
+    
+    entries = gemini.generate(prompt).get("entries", [])
+    
+    return {
+        "vector_store": vector_store,
+        "employment_entries": [
+            {**entry, "evidence_status": {"payslip": False, "tax_return": False, "bonus_statement": False}}
+            for entry in entries
+        ],
+        "missing_evidence": [],
+        "user_decision": None
+    }
+
+def primary_corroboration(state: AgentState) -> AgentState:
+    """Node 2: Verify evidence for each employment entry"""
+    missing_evidence = []
+    updated_entries = []
+    
+    for entry in state["employment_entries"]:
+        evidence_found = {"payslip": False, "tax_return": False, "bonus_statement": False}
+        
+        # Search for payslips
+        payslip_docs = state["vector_store"].similarity_search(
+            f"Payslip for {entry['employer']} {entry['service_duration']}",
+            k=2,
+            filter={"source": "payslip"}
+        )
+        evidence_found["payslip"] = len(payslip_docs) > 0
+        
+        # Search for tax returns
+        tax_docs = state["vector_store"].similarity_search(
+            f"Tax documents mentioning {entry['employer']} {entry['service_duration']}",
+            k=2,
+            filter={"source": "tax_return"}
+        )
+        evidence_found["tax_return"] = len(tax_docs) > 0
+        
+        # Search for bonus statements
+        bonus_docs = state["vector_store"].similarity_search(
+            f"Bonus compensation at {entry['employer']}",
+            k=2,
+            filter={"source": "bonus_statement"}
+        )
+        evidence_found["bonus_statement"] = len(bonus_docs) > 0
+        
+        # Track missing evidence
+        missing = [doc_type for doc_type, found in evidence_found.items() if not found]
+        if missing:
+            missing_evidence.append({
+                "employer": entry["employer"],
+                "missing_docs": missing,
+                "entry": entry
+            })
+        
+        updated_entries.append({**entry, "evidence_status": evidence_found})
+    
+    # Print evidence status report
+    print("\nPrimary Corroboration Report:")
+    for evidence in missing_evidence:
+        print(f"\nFor {evidence['employer']} ({evidence['entry']['designation']}):")
+        print(f"Missing evidence: {', '.join(evidence['missing_docs'])}")
+        print("Suggested documents to provide:")
+        print("- Monthly payslips" if "payslip" in evidence['missing_docs'] else "")
+        print("- Annual tax returns" if "tax_return" in evidence['missing_docs'] else "")
+        print("- Bonus statements" if "bonus_statement" in evidence['missing_docs'] else "")
+    
+    return {
+        **state,
+        "employment_entries": updated_entries,
+        "missing_evidence": missing_evidence
+    }
+
+def secondary_corroboration(state: AgentState) -> AgentState:
+    """Interactive estimation of missing compensation"""
+    if not state.get("user_decision"):
+        response = input("\nProceed with compensation estimation for entries with missing evidence? (y/n): ")
+        state["user_decision"] = response.lower() == "y"
+    
+    if not state["user_decision"]:
+        return state
+    
+    updated_entries = state["employment_entries"].copy()
+    
+    for entry in updated_entries:
+        if not entry.get("total_earnings"):
+            prompt = f"""Estimate total compensation for:
+            Position: {entry['designation']}
+            Company: {entry['employer']}
+            Duration: {entry['service_duration']}
+            
+            Consider industry averages and location data.
+            Return only a numerical estimate."""
+            
+            estimate = gemini.generate(prompt)
+            entry["total_earnings"] = f"Estimated {estimate}"
+    
+    return {
+        **state,
+        "employment_entries": updated_entries
+    }
+
+# Build interactive workflow
+workflow = StateGraph(AgentState)
+workflow.add_node("pre_profile", pre_profiling)
+workflow.add_node("primary_corroborate", primary_corroboration)
+workflow.add_node("secondary_corroborate", secondary_corroboration)
+
+workflow.set_entry_point("pre_profile")
+workflow.add_edge("pre_profile", "primary_corroborate")
+
+# Add conditional edge after primary corroboration
+workflow.add_conditional_edges(
+    "primary_corroborate",
+    lambda state: "secondary_corroborate" if state["missing_evidence"] else END
+)
+
+workflow.add_edge("secondary_corroborate", END)
+
+app = workflow.compile()
+
+# Execute with interactive elements
+final_state = app.invoke({})
+print("\nFinal Employment Profile:")
+for entry in final_state["employment_entries"]:
+    print(f"\n{entry['employer']} ({entry['designation']})")
+    print(f"Duration: {entry['service_duration']}")
+    print(f"Earnings: {entry.get('total_earnings', 'Not available')}")
+    print(f"Evidence Found: {[k for k,v in entry['evidence_status'].items() if v]}")
