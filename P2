@@ -1,0 +1,75 @@
+def primary_corroboration(state: AgentState) -> AgentState:
+    """Document-by-document corroboration with LLM classification"""
+    from langchain_community.document_loaders import PyPDFLoader
+    
+    updated_entries = state["employment_entries"].copy()
+    evidence_map = {i: [] for i in range(len(updated_entries))}  # Track evidence per entry
+    
+    # Load all documents
+    documents = []
+    for doc_path in os.listdir("supporting_folder/"):
+        if doc_path.endswith(".pdf"):
+            loader = PyPDFLoader(f"supporting_folder/{doc_path}")
+            pages = loader.load()
+            full_text = "\n".join([p.page_content for p in pages])
+            documents.append({
+                "path": doc_path,
+                "text": full_text
+            })
+    
+    # Process each document
+    for doc in documents:
+        # Step 1: Classify document type
+        classify_prompt = f"""Classify this document:
+        {doc['text'][:2000]}...  # First 2000 chars for classification
+        
+        Options:
+        1. Corroboration document (payslip, tax return, bonus statement)
+        2. Other document
+        
+        Return JSON: {{"type": "corroboration"|"other"}}"""
+        
+        classification = gemini.generate(classify_prompt)
+        if classification.get("type") != "corroboration":
+            continue
+        
+        # Step 2: Check against each employment entry
+        for i, entry in enumerate(updated_entries):
+            evidence_prompt = f"""Does this document support the employment details?
+            Employment:
+            - Company: {entry['employer']}
+            - Position: {entry['designation']}
+            - Duration: {entry['service_duration']}
+            
+            Document content:
+            {doc['text'][:4000]}...  # First 4000 chars for evidence check
+            
+            Return JSON: {{"is_evidence": bool, "reason": str}}"""
+            
+            result = gemini.generate(evidence_prompt)
+            if result.get("is_evidence"):
+                evidence_map[i].append(doc['path'])
+    
+    # Update entries with evidence
+    for i, entry in enumerate(updated_entries):
+        entry["supporting_documents"] = evidence_map[i]
+    
+    # Generate report
+    print("\nPrimary Corroboration Report:")
+    for entry in updated_entries:
+        print(f"\n{entry['employer']} ({entry['designation']})")
+        if entry["supporting_documents"]:
+            print("Supported by:")
+            for doc in entry["supporting_documents"]:
+                print(f"- {doc}")
+        else:
+            print("No supporting documents found")
+            print("Consider providing:")
+            print("- Payslips from the employment period")
+            print("- Tax returns mentioning the employer")
+            print("- Bonus/compensation statements")
+    
+    return {
+        **state,
+        "employment_entries": updated_entries
+    }
