@@ -172,8 +172,8 @@
             <span class="expander" onclick="togglePane()">&#9654;</span>
         </div>
         <div class="input-box">
-            <input type="text" id="userInput" placeholder="Type a message...",onkeypress="handleKeyPress(event)">
-            <button onclick="sendMessage()">Send</button>
+            <input type="text" id="userInput" placeholder="Type a message..." onkeypress="return searchKeyPress(event);" >
+            <button id="btnSearch" onclick="sendMessage()">Send</button>
         </div>
     </div>
     <div class="right-pane" id="rightPane">
@@ -181,6 +181,17 @@
     </div>
     
     <script>
+		function searchKeyPress(e)
+		{
+			// look for window.event in case event isn't passed in
+			e = e || window.event;
+			if (e.keyCode == 13)
+			{
+				document.getElementById('btnSearch').click();
+				return false;
+			}
+			return true;
+		}
         function togglePane() {
             let chat = document.getElementById("chatContainer");
             let rightPane = document.getElementById("rightPane");
@@ -192,6 +203,7 @@
             let chat = document.getElementById("chatContainer");
             chat.classList.toggle("collapsed");
         }
+		
 		function sendMessage() {
             let inputField = document.getElementById("userInput");
             let chatWindow = document.getElementById("chatWindow");
